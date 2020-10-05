@@ -225,7 +225,7 @@ func main() {
 	for jobName, jobStatus := range tgs.FlakingJobs {
 		jobFlakyTests := jobStatus.jobTestResults
 		for _, flakyTest := range jobFlakyTests.Tests {
-			fmt.Printf("%s,%s,%s,%s,%s\n", tgs.CollectedAt.Format(time.UnixDate),
+			fmt.Printf("%s,%s,%s,\"%s\",%s\n", tgs.CollectedAt.Format(time.UnixDate),
 				jobStatus.OverallStatus, jobName, flakyTest.Name, jobStatus.url)
 		}
 	}
