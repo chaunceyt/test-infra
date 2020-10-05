@@ -1,8 +1,7 @@
-# Flake Trackeri WIP#
-CURRENTLY IMPLEMENTED -  Creates a point-in-time CSV report listing flakying tests found on the Jobs reported as FLAKY in the TestGridSummary for sig-release-master-blocking
+# Flake Tracker WIP#
+CURRENTLY IMPLEMENTED - Creates a point-in-time CSV report listing flakying tests found on the Jobs reported as FLAKY in the TestGridSummary for sig-release-master-blocking
 
-TODO - For a given TestGrid TabGroup and a coresponding Github Project Board set up to monitor deflaking work 
-the Flake Tracker provides a report on the status of jobs with respect to flakiness of TabGroups CI Jobs 
+TODO - For a given TestGrid TabGroup and a corresponding Github Project Board set up to monitor de-flaking work,the Flake Tracker provides a report on the status of issues logged against flaking tests in jobs found on the TabGroup.
 
 TODO - For every currently flaking job, the report retrieves 
  the names of the flaky tests and then goes off to the Project Board to check for the presence of a logged issue and retireves the issues and their status from the board.
