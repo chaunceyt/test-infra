@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -39,23 +40,23 @@ type jobStatus struct {
 type testGridJobResult struct {
 	TestGroupName string `json:"test-group-name"`
 	/* Unused fields. Reviewers can ignore for now. Left in for future report extention
-		Query         string `json:"query"`
-		Status        string `json:"status"`
-		PhaseTimer    struct {
-			Phases []string  `json:"phases"`
-			Delta  []float64 `json:"delta"`
-			Total  float64   `json:"total"`
-		} `json:"phase-timer"`
-		Cached  bool   `json:"cached"`
-		Summary string `json:"summary"`
-		Bugs    struct {
-		} `json:"bugs"`
-		Changelists       []string   `json:"changelists"`
-		ColumnIds         []string   `json:"column_ids"`
-		CustomColumns     [][]string `json:"custom-columns"`
-		ColumnHeaderNames []string   `json:"column-header-names"`
-		Groups            []string   `json:"groups"`
-		Metrics           []string   `json:"metrics"`
+	Query         string `json:"query"`
+	Status        string `json:"status"`
+	PhaseTimer    struct {
+		Phases []string  `json:"phases"`
+		Delta  []float64 `json:"delta"`
+		Total  float64   `json:"total"`
+	} `json:"phase-timer"`
+	Cached  bool   `json:"cached"`
+	Summary string `json:"summary"`
+	Bugs    struct {
+	} `json:"bugs"`
+	Changelists       []string   `json:"changelists"`
+	ColumnIds         []string   `json:"column_ids"`
+	CustomColumns     [][]string `json:"custom-columns"`
+	ColumnHeaderNames []string   `json:"column-header-names"`
+	Groups            []string   `json:"groups"`
+	Metrics           []string   `json:"metrics"`
 	*/
 	Tests []struct {
 		Name         string        `json:"name"`
@@ -70,6 +71,8 @@ type testGridJobResult struct {
 		} `json:"statuses"`
 		Target       string      `json:"target"`
 		UserProperty interface{} `json:"user_property"`
+		// Calculated Field added here
+		sig string
 	} `json:"tests"`
 	/* Unused fields
 		RowIds       []string    `json:"row_ids"`
@@ -161,11 +164,26 @@ func (t *TabGroupStatus) CollectFlakyTests() error {
 		// Store data and url where we found it. tmp var used as per
 		// https://github.com/golang/go/issues/3117#issuecomment-66063615
 		var tmp = t.FlakingJobs[jobName]
+		addSigToTestResults(&flakingTestResults)
 		tmp.jobTestResults = &flakingTestResults
 		tmp.url = url
 		t.FlakingJobs[jobName] = tmp
 	}
 	return nil
+}
+
+// returns sig from test name if test starts with [sig-SIGNAME] else nil
+func addSigToTestResults(tgJobResult *testGridJobResult) {
+	var sigRe = regexp.MustCompile(`\[sig-.+?\] `)
+	for i, t := range tgJobResult.Tests {
+		sig := sigRe.FindString(t.Name)
+		if sig != "" {
+			tgJobResult.Tests[i].sig = sig
+		} else {
+			tgJobResult.Tests[i].sig = "job-owner" 
+		}
+	}
+	return
 }
 
 // CollectStatus populates t with job status summary data from TestGrid
@@ -218,15 +236,15 @@ func (t *TabGroupStatus) CollectStatus() error {
 }
 
 func main() {
-	tgs := &TabGroupStatus{Name: "sig-release-master-blocking", CollectedAt: time.Now()}
+	tgs := &TabGroupStatus{Name: "sig-release-master-informing", CollectedAt: time.Now()}
 	tgs.CollectStatus()
 	tgs.CollectFlakyTests()
 
 	for jobName, jobStatus := range tgs.FlakingJobs {
 		jobFlakyTests := jobStatus.jobTestResults
 		for _, flakyTest := range jobFlakyTests.Tests {
-			fmt.Printf("%s,%s,%s,\"%s\",%s\n", tgs.CollectedAt.Format(time.UnixDate),
-				jobStatus.OverallStatus, jobName, flakyTest.Name, jobStatus.url)
+			fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n", tgs.CollectedAt.Format(time.UnixDate),
+				jobStatus.OverallStatus, jobName, flakyTest.sig, flakyTest.Name, jobStatus.url)
 		}
 	}
 }
