@@ -1,20 +1,14 @@
-# Flake Tracker WIP#
-CURRENTLY IMPLEMENTED - Creates a point-in-time CSV report listing flakying tests found on the Jobs reported as FLAKY in the TestGridSummary for sig-release-master-blocking
+# Flake Tracker
 
-TODO - For a given TestGrid TabGroup and a corresponding Github Project Board set up to monitor de-flaking work,the Flake Tracker provides a report on the status of issues logged against flaking tests in jobs found on the TabGroup.
-
-TODO - For every currently flaking job, the report retrieves 
- the names of the flaky tests and then goes off to the Project Board to check for the presence of a logged issue and retireves the issues and their status from the board.
-
-This report is designed to support the work of any team who is interested in detecting, triaging and fixing flakes on the Kubernetes project.
+Creates a point-in-time CSV (for now) report listing tests that produce non-determinstic results (NDRs) found on the Jobs reported as FLAKY in the TestGridSummary for sig-release-blocking and sig-release-informing
 
 The report offers the following benefits :
 
-  * helps prevent logging duplicate issues for a test that is producing non-deterministic results.
-
-  * TODO provides a flake detection percentage 
-
-  * shows distribution of flakes accross the project per job, per SIG
+  * provides automatic on-demand status updates for weekly Release Team Meeting
+  
+  * shows distribution of NDRs accross the project per job, per SIG 
+  
+  * TODO shows what NDRs are and are not being tracked by GH Issues 
 
   * TODO shows distribution of categorised effort (Awaiting response, triaged, PR submitted, monitoring, fixed) accross the project per job, per sig
 
@@ -26,7 +20,7 @@ go build && ./flake-tracker
 ```
 
 # Usage#
-Run a report on sig-release-master-blocking
+Run a report on sig-release-blocking
 
 ``` 
 ./flake-tracker 
@@ -35,9 +29,9 @@ Run a report on sig-release-master-blocking
 ## Parameters and environment ##
 At present no parameters are required to run the program future versions may have the following cmd line flags
 TODO 
---config file YAML file that contains report configuration
---gh-token GitHub Oauth2 token
---tab-group TestGrid TabGroup
---project-board GithubProjectBoard yaml
---output Output format - json, csv, org
---port - if specificed starts a server listenting on port and displays a HTML version of the report
+* --config file YAML file that contains report configuration, tabgroups, project boards, output format, datastore
+* --gh-token / env var GitHub Oauth2 token
+* --tab-group TestGrid TabGroup
+* --project-board GithubProjectBoard yaml
+* --output Output format - json, csv, org
+* --port - if specificed starts a server listenting on port and displays a HTML version of the report
