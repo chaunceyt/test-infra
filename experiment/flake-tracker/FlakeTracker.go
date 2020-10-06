@@ -9,22 +9,27 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const TG_TABGROUP_SUMMARY_FMT string = "https://testgrid.k8s.io/%s/summary"
 const TG_JOB_TEST_TABLE_FMT string = "https://testgrid.k8s.io/%s/table?tab=%s&width=5&exclude-non-failed-tests=&sort-by-flakiness=&dashboard=%s"
 
+var reportFields log.Fields
+
 // Tracks status of Jobs for a single TestGrid TabGroup
 type TabGroupStatus struct {
-	Name        string
-	CollectedAt time.Time
-	Count       int
-	FlakingJobs map[string]jobStatus
-	PassingJobs map[string]jobStatus
-	FailedJobs  map[string]jobStatus
+	Name               string
+	CollectedAt        time.Time
+	Count              int
+	TabGroupSummaryUrl string
+	FlakingJobs        map[string]jobStatus
+	PassingJobs        map[string]jobStatus
+	FailedJobs         map[string]jobStatus
 }
 
-// Status of job. jobName is the key in maps ^^
+// Status of job. jobName is the key in the TabGroupStatus Jobs maps
 type jobStatus struct {
 	OverallStatus           string             `json:"overall_status"`
 	Alert                   string             `json:"alert"`
@@ -33,30 +38,31 @@ type jobStatus struct {
 	LatestGreenRun          string             `json:"latest_green"`
 	LatestStatusIcon        string             `json:"overall_status_icon"`
 	LatestStatusDescription string             `json:"status"`
-	url                     string             // test grid url that is ued to populate jobTestResults
-	jobTestResults          *testGridJobResult // Collected separately hence no json string here
+	url                     string             // Url for testGridJobResult
+	jobTestResults          *testGridJobResult // See CollectFlakyTests
 }
 
 type testGridJobResult struct {
 	TestGroupName string `json:"test-group-name"`
-	/* Unused fields. Reviewers can ignore for now. Left in for future report extention
-	Query         string `json:"query"`
-	Status        string `json:"status"`
-	PhaseTimer    struct {
-		Phases []string  `json:"phases"`
-		Delta  []float64 `json:"delta"`
-		Total  float64   `json:"total"`
-	} `json:"phase-timer"`
-	Cached  bool   `json:"cached"`
-	Summary string `json:"summary"`
-	Bugs    struct {
-	} `json:"bugs"`
-	Changelists       []string   `json:"changelists"`
-	ColumnIds         []string   `json:"column_ids"`
-	CustomColumns     [][]string `json:"custom-columns"`
-	ColumnHeaderNames []string   `json:"column-header-names"`
-	Groups            []string   `json:"groups"`
-	Metrics           []string   `json:"metrics"`
+	/* Unused fields. Reviewers can ignore for now.
+	           Left in as comment for possible future report extention
+		Query         string `json:"query"`
+		Status        string `json:"status"`
+		PhaseTimer    struct {
+			Phases []string  `json:"phases"`
+			Delta  []float64 `json:"delta"`
+			Total  float64   `json:"total"`
+		} `json:"phase-timer"`
+		Cached  bool   `json:"cached"`
+		Summary string `json:"summary"`
+		Bugs    struct {
+		} `json:"bugs"`
+		Changelists       []string   `json:"changelists"`
+		ColumnIds         []string   `json:"column_ids"`
+		CustomColumns     [][]string `json:"custom-columns"`
+		ColumnHeaderNames []string   `json:"column-header-names"`
+		Groups            []string   `json:"groups"`
+		Metrics           []string   `json:"metrics"`
 	*/
 	Tests []struct {
 		Name         string        `json:"name"`
@@ -145,20 +151,18 @@ type testGridJobResult struct {
 func (t *TabGroupStatus) CollectFlakyTests() error {
 
 	for jobName := range t.FlakingJobs {
-		url := fmt.Sprintf(TG_JOB_TEST_TABLE_FMT, t.Name, url.QueryEscape(jobName), t.Name)
+		url := fmt.Sprintf(TG_JOB_TEST_TABLE_FMT,
+			t.Name, url.QueryEscape(jobName), t.Name)
 		resp, err := http.Get(url)
-		if err != nil { // TODO convert to use logger
-			fmt.Printf("%v", err)
+		if err != nil {
+			t.logError("HTTP get job test results", err, url)
 			return err
 		}
 		body, err := ioutil.ReadAll(resp.Body)
 		var flakingTestResults testGridJobResult
 		err = json.Unmarshal(body, &flakingTestResults)
 		if err != nil {
-			fmt.Printf("CollFlkTests : Unmarshal %v", err)
-			fmt.Printf("CollFlkTests : %v\n", url)
-			fmt.Printf("CollFlkTests : %v\n", string(body))
-
+			t.logError("Unmarshalling Test Result", err, url)
 			return err
 		}
 		// Store data and url where we found it. tmp var used as per
@@ -172,7 +176,9 @@ func (t *TabGroupStatus) CollectFlakyTests() error {
 	return nil
 }
 
-// returns sig from test name if test starts with [sig-SIGNAME] else nil
+// addSigToTestResults sets the sig field on tgJobResult using the test name
+// by finding the first occurance of [sig-SIGNAME], if no sig is found sets sig
+// to "job-owner"
 func addSigToTestResults(tgJobResult *testGridJobResult) {
 	var sigRe = regexp.MustCompile(`\[sig-.+?\] `)
 	for i, t := range tgJobResult.Tests {
@@ -180,7 +186,7 @@ func addSigToTestResults(tgJobResult *testGridJobResult) {
 		if sig != "" {
 			tgJobResult.Tests[i].sig = sig
 		} else {
-			tgJobResult.Tests[i].sig = "job-owner" 
+			tgJobResult.Tests[i].sig = "job-owner"
 		}
 	}
 	return
@@ -188,17 +194,15 @@ func addSigToTestResults(tgJobResult *testGridJobResult) {
 
 // CollectStatus populates t with job status summary data from TestGrid
 func (t *TabGroupStatus) CollectStatus() error {
-	url := fmt.Sprintf(TG_TABGROUP_SUMMARY_FMT, t.Name)
-
-	resp, err := http.Get(url)
-	if err != nil { // TODO convert to use logger
-		fmt.Printf("%v", err)
+	resp, err := http.Get(t.TabGroupSummaryUrl)
+	if err != nil {
+		t.logError("HTTP getting", err)
 		return err
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil { // TODO convert to use logger
-		fmt.Printf("%v", err)
+	if err != nil {
+		t.logError("Reading HTTP response buffer", err)
 		return err
 	}
 
@@ -206,6 +210,7 @@ func (t *TabGroupStatus) CollectStatus() error {
 
 	err = json.Unmarshal(body, &jobsSummary)
 	if err != nil {
+		t.logError("UnMarshalling reponse body", err)
 		return err
 	}
 
@@ -235,16 +240,45 @@ func (t *TabGroupStatus) CollectStatus() error {
 	return nil
 }
 
-func main() {
-	tgs := &TabGroupStatus{Name: "sig-release-master-informing", CollectedAt: time.Now()}
-	tgs.CollectStatus()
-	tgs.CollectFlakyTests()
+func (t *TabGroupStatus) logError(action string, err error, fields ...string) log.Logger {
+	var augmentedLogger = log.WithFields(reportFields).WithField(
+		"ACTION", action,
+	)
+	for i, field := range fields {
+		augmentedLogger.WithField(fmt.Sprintf("ExtraField %d",i),field)
+	}
+	augmentedLogger.Error("%v", err)
 
-	for jobName, jobStatus := range tgs.FlakingJobs {
+	return log.Logger{}
+}
+
+func main() {
+
+	srInforming := &TabGroupStatus{
+		Name:        "sig-release-master-informing",
+		CollectedAt: time.Now(),
+		TabGroupSummaryUrl: fmt.Sprintf(TG_TABGROUP_SUMMARY_FMT,
+			"sig-release-master-informing"),
+	}
+
+	log.SetFormatter(&log.JSONFormatter{})
+	reportFields = log.Fields{
+		"DATA BEING RETRIEVED": "Job Status Summary TestGrid TabGroup",
+		"TEST_GRID TAB_GROUP":  srInforming.Name,
+		"COLLECTION TIME":      srInforming.CollectedAt,
+		"TB GRP SMMRY URL":     srInforming.TabGroupSummaryUrl,
+	}
+
+	srInforming.CollectStatus()
+	srInforming.CollectFlakyTests()
+
+	for jobName, jobStatus := range srInforming.FlakingJobs {
 		jobFlakyTests := jobStatus.jobTestResults
 		for _, flakyTest := range jobFlakyTests.Tests {
-			fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n", tgs.CollectedAt.Format(time.UnixDate),
-				jobStatus.OverallStatus, jobName, flakyTest.sig, flakyTest.Name, jobStatus.url)
+			fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n",
+				srInforming.CollectedAt.Format(time.UnixDate),
+				jobStatus.OverallStatus, jobName, flakyTest.sig,
+				flakyTest.Name, jobStatus.url)
 		}
 	}
 }
