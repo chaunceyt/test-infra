@@ -1,20 +1,28 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/go-github/github"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/oauth2"
 )
 
-const TG_TABGROUP_SUMMARY_FMT string = "https://testgrid.k8s.io/%s/summary"
-const TG_JOB_TEST_TABLE_FMT string = "https://testgrid.k8s.io/%s/table?tab=%s&width=5&exclude-non-failed-tests=&sort-by-flakiness=&dashboard=%s"
+const (
+	TG_TABGROUP_SUMMARY_FMT string = "https://testgrid.k8s.io/%s/summary"
+	TG_JOB_TEST_TABLE_FMT   string = "https://testgrid.k8s.io/%s/table?tab=%s&width=5&exclude-non-failed-tests=&sort-by-flakiness=&dashboard=%s"
+	ciSignalBoardId                = 2093513
+)
 
 var reportFields log.Fields
 
@@ -24,9 +32,27 @@ type TabGroupStatus struct {
 	CollectedAt        time.Time
 	Count              int
 	TabGroupSummaryUrl string
+	JobIssues          map[string]issue
 	FlakingJobs        map[string]jobStatus
 	PassingJobs        map[string]jobStatus
 	FailedJobs         map[string]jobStatus
+}
+
+type issue struct {
+	org         string
+	issue       string
+	repo        string
+	board       string
+	status      string
+	lastupdate  string
+	created     time.Time
+	lastupdated time.Time
+	fix         pr
+	evidence    []string // Evidenciary URLs from Prow, Testgrid and Triage for flakes
+}
+
+type pr struct {
+	id, status string
 }
 
 // Status of job. jobName is the key in the TabGroupStatus Jobs maps
@@ -165,6 +191,7 @@ func (t *TabGroupStatus) CollectFlakyTests() error {
 			t.logError("Unmarshalling Test Result", err, url)
 			return err
 		}
+		// SearchLoggedIssues()
 		// Store data and url where we found it. tmp var used as per
 		// https://github.com/golang/go/issues/3117#issuecomment-66063615
 		var tmp = t.FlakingJobs[jobName]
@@ -176,6 +203,77 @@ func (t *TabGroupStatus) CollectFlakyTests() error {
 	return nil
 }
 
+// CollectIssuesFromBoard retrieves logged issues from the user-supplied board
+// populating maps that associate them with the CI Jobs (and tests) where flakes occured
+func (t *TabGroupStatus) CollectIssuesFromBoard() {
+
+	githubApiToken := os.Getenv("GITHUB_AUTH_TOKEN")
+	if githubApiToken == "" {
+		log.Error("GITHUB_API_TOKEN is not set in the process env. Use export GIHUB_API_TOKEN")
+		panic("Quitting")
+	}
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: githubApiToken})
+	tc := oauth2.NewClient(ctx, ts)
+	client := github.NewClient(tc)
+	rl, _, e := client.RateLimits(ctx)
+
+	if _, ok := e.(*github.RateLimitError); ok {
+		log.Error(rl)
+		panic("Github client Rate Limit reached")
+	}
+
+	opt := &github.ProjectCardListOptions{}
+	listOpt := &github.ListOptions{}
+	cols, r, err := client.Projects.ListProjectColumns(ctx, ciSignalBoardId, listOpt)
+	log.Infof("c.P.LPC cols %v\n",cols)
+
+	if err != nil  {
+		log.Error(err)
+		log.Error(r)
+		panic("Github client could not get")
+	}
+	for _, col:= range cols {
+		cards, _, err := client.Projects.ListProjectCards(ctx, *col.ID, opt)
+
+		if err != nil {
+			log.Error(err)
+			log.Error(r)
+			panic("Github client could not get")
+		}
+
+		for i, card  := range cards {
+			fmt.Printf("col[%d] card URL : %+v \n",i,card)
+			fmt.Printf("col[%d] GetContentUrl : %s\n",i,card.GetContentURL())
+			fmt.Printf("col[%d] GetUrl: %s\n",i,card.GetURL())
+			fmt.Printf("col[%d] CreatedBy : %s\n",i,card.GetCreator().GetLogin())
+			flake , err := getIssueDetail(client, card.GetContentURL())
+			if err != nil {
+				log.Errorf("flake-tracker getIssueDetail()\n%v\n", err)
+			}
+			fmt.Printf("Flake title: %v\n",flake)
+		}
+	}
+}
+func getIssueDetail(client *github.Client, jobSummaryUrl string) (*github.Issue, error) {
+
+	urlParts := strings.Split(jobSummaryUrl, "/")
+	log.Info(urlParts)
+	i := urlParts[len(urlParts)-1]
+	r := urlParts[len(urlParts)-3]
+	o := urlParts[len(urlParts)-4]
+
+	issueNumber, err := strconv.Atoi(i)
+	if err != nil {
+		return nil, err
+	}
+	ghIssue, _, err := client.Issues.Get(context.Background(), o, r, issueNumber)
+
+	if err != nil {
+		return nil, err
+	}
+	return ghIssue, nil
+}
 // addSigToTestResults sets the sig field on tgJobResult using the test name
 // by finding the first occurance of [sig-SIGNAME], if no sig is found sets sig
 // to "job-owner"
@@ -206,9 +304,9 @@ func (t *TabGroupStatus) CollectStatus() error {
 		return err
 	}
 
-	jobsSummary := make(map[string]jobStatus)
+	flake := make(map[string]jobStatus)
 
-	err = json.Unmarshal(body, &jobsSummary)
+	err = json.Unmarshal(body, &flake)
 	if err != nil {
 		t.logError("UnMarshalling reponse body", err)
 		return err
@@ -216,27 +314,27 @@ func (t *TabGroupStatus) CollectStatus() error {
 
 	t.FlakingJobs = make(map[string]jobStatus, 0)
 
-	for name, job := range jobsSummary {
+	for name, job := range flake {
 		if job.OverallStatus == "FLAKY" {
-			t.FlakingJobs[name] = jobsSummary[name]
+			t.FlakingJobs[name] = flake[name]
 		}
 	}
 
 	t.FailedJobs = make(map[string]jobStatus, 0)
-	for name, job := range jobsSummary {
+	for name, job := range flake {
 		if strings.Compare(job.OverallStatus, "FAILED") == 0 {
 			t.FailedJobs[name] = job
 		}
 	}
 
 	t.PassingJobs = make(map[string]jobStatus, 0)
-	for name, job := range jobsSummary {
+	for name, job := range flake {
 		if strings.EqualFold(job.OverallStatus, "PASSING") {
 			t.PassingJobs[name] = job
 		}
 	}
 
-	t.Count = len(jobsSummary)
+	t.Count = len(flake)
 	return nil
 }
 
@@ -245,7 +343,7 @@ func (t *TabGroupStatus) logError(action string, err error, fields ...string) lo
 		"ACTION", action,
 	)
 	for i, field := range fields {
-		augmentedLogger.WithField(fmt.Sprintf("ExtraField %d",i),field)
+		augmentedLogger.WithField(fmt.Sprintf("ExtraField %d", i), field)
 	}
 	augmentedLogger.Error("%v", err)
 
@@ -254,29 +352,30 @@ func (t *TabGroupStatus) logError(action string, err error, fields ...string) lo
 
 func main() {
 
-	srInforming := &TabGroupStatus{
-		Name:        "sig-release-master-informing",
+	srBlocking := &TabGroupStatus{
+		Name:        "sig-release-master-blocking",
 		CollectedAt: time.Now(),
 		TabGroupSummaryUrl: fmt.Sprintf(TG_TABGROUP_SUMMARY_FMT,
-			"sig-release-master-informing"),
+			"sig-release-master-blocking"),
 	}
 
 	log.SetFormatter(&log.JSONFormatter{})
 	reportFields = log.Fields{
 		"DATA BEING RETRIEVED": "Job Status Summary TestGrid TabGroup",
-		"TEST_GRID TAB_GROUP":  srInforming.Name,
-		"COLLECTION TIME":      srInforming.CollectedAt,
-		"TB GRP SMMRY URL":     srInforming.TabGroupSummaryUrl,
+		"TEST_GRID TAB_GROUP":  srBlocking.Name,
+		"COLLECTION TIME":      srBlocking.CollectedAt,
+		"TB GRP SMMRY URL":     srBlocking.TabGroupSummaryUrl,
 	}
 
-	srInforming.CollectStatus()
-	srInforming.CollectFlakyTests()
+	// srBlocking.CollectStatus()
+	// srBlocking.CollectFlakyTests()
+	srBlocking.CollectIssuesFromBoard()
 
-	for jobName, jobStatus := range srInforming.FlakingJobs {
+	for jobName, jobStatus := range srBlocking.FlakingJobs
 		jobFlakyTests := jobStatus.jobTestResults
 		for _, flakyTest := range jobFlakyTests.Tests {
 			fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n",
-				srInforming.CollectedAt.Format(time.UnixDate),
+				srBlocking.CollectedAt.Format(time.UnixDate),
 				jobStatus.OverallStatus, jobName, flakyTest.sig,
 				flakyTest.Name, jobStatus.url)
 		}
