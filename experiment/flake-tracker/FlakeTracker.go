@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -176,6 +175,35 @@ func (t *TabGroupStatus) CollectFlakyTests() error {
 	return nil
 }
 
+// CollectFailedTests adds a list of Tests that are failing for each Failed Job
+func (t *TabGroupStatus) CollectFailedTests() error {
+
+	for jobName := range t.FailedJobs {
+		url := fmt.Sprintf(TG_JOB_TEST_TABLE_FMT,
+			t.Name, url.QueryEscape(jobName), t.Name)
+		resp, err := http.Get(url)
+		if err != nil {
+			t.logError("HTTP get Failed job test results", err, url)
+			return err
+		}
+		body, err := ioutil.ReadAll(resp.Body)
+		var failedTestResults testGridJobResult
+		err = json.Unmarshal(body, &failedTestResults)
+		if err != nil {
+			t.logError("Unmarshalling Failed Test Result", err, url)
+			return err
+		}
+		// Store data and url where we found it. tmp var used as per
+		// https://github.com/golang/go/issues/3117#issuecomment-66063615
+		var tmp = t.FailedJobs[jobName]
+		addSigToTestResults(&failedTestResults)
+		tmp.jobTestResults = &failedTestResults
+		tmp.url = url
+		t.FailedJobs[jobName] = tmp
+	}
+	return nil
+}
+
 // addSigToTestResults sets the sig field on tgJobResult using the test name
 // by finding the first occurance of [sig-SIGNAME], if no sig is found sets sig
 // to "job-owner"
@@ -224,14 +252,14 @@ func (t *TabGroupStatus) CollectStatus() error {
 
 	t.FailedJobs = make(map[string]jobStatus, 0)
 	for name, job := range jobsSummary {
-		if strings.Compare(job.OverallStatus, "FAILED") == 0 {
+		if job.OverallStatus == "FAILING" {
 			t.FailedJobs[name] = job
 		}
 	}
 
 	t.PassingJobs = make(map[string]jobStatus, 0)
 	for name, job := range jobsSummary {
-		if strings.EqualFold(job.OverallStatus, "PASSING") {
+		if job.OverallStatus == "PASSING" {
 			t.PassingJobs[name] = job
 		}
 	}
@@ -245,7 +273,7 @@ func (t *TabGroupStatus) logError(action string, err error, fields ...string) lo
 		"ACTION", action,
 	)
 	for i, field := range fields {
-		augmentedLogger.WithField(fmt.Sprintf("ExtraField %d",i),field)
+		augmentedLogger.WithField(fmt.Sprintf("ExtraField %d", i), field)
 	}
 	augmentedLogger.Error("%v", err)
 
@@ -254,31 +282,59 @@ func (t *TabGroupStatus) logError(action string, err error, fields ...string) lo
 
 func main() {
 
-	srInforming := &TabGroupStatus{
-		Name:        "sig-release-master-informing",
-		CollectedAt: time.Now(),
-		TabGroupSummaryUrl: fmt.Sprintf(TG_TABGROUP_SUMMARY_FMT,
-			"sig-release-master-informing"),
+	tgInforming := &TabGroupStatus{
+		Name:               "sig-release-master-informing",
+		CollectedAt:        time.Now(),
+		TabGroupSummaryUrl: fmt.Sprintf(TG_TABGROUP_SUMMARY_FMT, "sig-release-master-informing"),
 	}
+	tgBlocking := &TabGroupStatus{
+		Name:               "sig-release-master-blocking",
+		CollectedAt:        time.Now(),
+		TabGroupSummaryUrl: fmt.Sprintf(TG_TABGROUP_SUMMARY_FMT, "sig-release-master-blocking"),
+	}
+
+	runReport(tgBlocking)
+	runReport(tgInforming)
+
+}
+
+func runReport(tabGroupStatus *TabGroupStatus) {
 
 	log.SetFormatter(&log.JSONFormatter{})
 	reportFields = log.Fields{
 		"DATA BEING RETRIEVED": "Job Status Summary TestGrid TabGroup",
-		"TEST_GRID TAB_GROUP":  srInforming.Name,
-		"COLLECTION TIME":      srInforming.CollectedAt,
-		"TB GRP SMMRY URL":     srInforming.TabGroupSummaryUrl,
+		"TEST_GRID TAB_GROUP":  tabGroupStatus.Name,
+		"COLLECTION TIME":      tabGroupStatus.CollectedAt,
+		"TB GRP SMMRY URL":     tabGroupStatus.TabGroupSummaryUrl,
 	}
 
-	srInforming.CollectStatus()
-	srInforming.CollectFlakyTests()
+	tabGroupStatus.CollectStatus()
+	tabGroupStatus.CollectFlakyTests()
+	tabGroupStatus.CollectFailedTests()
 
-	for jobName, jobStatus := range srInforming.FlakingJobs {
+	for jobName, jobStatus := range tabGroupStatus.FlakingJobs {
 		jobFlakyTests := jobStatus.jobTestResults
 		for _, flakyTest := range jobFlakyTests.Tests {
 			fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n",
-				srInforming.CollectedAt.Format(time.UnixDate),
+				tabGroupStatus.CollectedAt.Format(time.UnixDate),
 				jobStatus.OverallStatus, jobName, flakyTest.sig,
 				flakyTest.Name, jobStatus.url)
 		}
 	}
+
+	for jobName, jobStatus := range tabGroupStatus.FailedJobs {
+		jobFailedTests := jobStatus.jobTestResults
+		for _, failedTest := range jobFailedTests.Tests {
+			fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n",
+				tabGroupStatus.CollectedAt.Format(time.UnixDate),
+				jobStatus.OverallStatus, jobName, failedTest.sig,
+				failedTest.Name, jobStatus.url)
+		}
+	}
+	for jobName, jobStatus := range tabGroupStatus.PassingJobs {
+		fmt.Printf("%s,%s,%s,\"%s\",\"%s\",%s\n",
+			tabGroupStatus.CollectedAt.Format(time.UnixDate),
+			jobStatus.OverallStatus, jobName, "", "", jobStatus.url)
+	}
+
 }
