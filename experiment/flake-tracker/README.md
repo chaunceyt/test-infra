@@ -16,7 +16,12 @@ The report offers the following benefits :
 The Project is built using go version go.1.14.4
 
 ``` 
-go build && ./flake-tracker
+make build && ./flake-tracker
+
+# create container image
+make container
+docker run -v$(pwd):/workspace -w /workspace local/flake-tracker
+
 ```
 
 # Usage#
@@ -24,6 +29,12 @@ Run a report on sig-release-blocking
 
 ``` 
 ./flake-tracker 
+
+# To generate json file(s)
+./flake-tracker -output json
+
+# use container image local/flake-tracker
+docker run -v$(pwd):/workspace -w /workspace local/flake-tracker -o json
 ```
 
 ## Parameters and environment ##

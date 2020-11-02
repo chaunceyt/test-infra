@@ -1,0 +1,6 @@
+Makefile
+flake-tracker
+.git
+*.md
+*.json
+
